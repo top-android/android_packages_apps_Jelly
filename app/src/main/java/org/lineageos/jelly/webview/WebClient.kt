@@ -40,11 +40,24 @@ import org.lineageos.jelly.utils.AssetLoader
 import org.lineageos.jelly.utils.IntentUtils
 import org.lineageos.jelly.utils.UrlUtils
 import java.net.URISyntaxException
+import java.util.Locale
 
 internal class WebClient(
     private val context: Context,
     private val urlBarLayout: UrlBarLayout,
 ) : WebViewClient() {
+    companion object {
+        // cannon: 只允许这些 scheme 留在 WebView 内正常加载
+        private val WEB_SCHEMES = setOf(
+            "http", "https", "content", "file", "chrome",
+            "about", "data", "javascript", "inline",
+        )
+        // cannon: 只允许这几个 scheme 交给系统（电话/短信/邮件/商店/地图），其余一律拦在浏览器内
+        private val ALLOWED_EXTERNAL_SCHEMES = setOf(
+            "tel", "mailto", "sms", "smsto", "mms", "market", "geo",
+        )
+    }
+
     private val scripts by lazy {
         val mediaSessionAPI = AssetLoader.loadAsset(
             context.resources,
@@ -80,6 +93,11 @@ internal class WebClient(
     }
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+        val navUrl = request.url.toString()
+        // cannon: 拦截非白名单 scheme 的 App 深链劫持（如 baiduboxapp://），子框架同样拦
+        if (shouldBlockNavigation(navUrl)) {
+            return true
+        }
         if (request.isForMainFrame) {
             val webViewExt = view as WebViewExt
             val url = request.url.toString()
@@ -126,6 +144,26 @@ internal class WebClient(
             }
             .setOnDismissListener { handler.cancel() }
             .show()
+    }
+
+    /**
+     * cannon: 判断本次导航是否要拦下。Web scheme 放行；外抛白名单放行；
+     * intent:// 看内层 scheme；其余拦掉（页面原地不动）。行为对齐 Via 等 WebView 浏览器。
+     */
+    private fun shouldBlockNavigation(url: String): Boolean {
+        val scheme = runCatching { Uri.parse(url).scheme }.getOrNull()
+            ?.lowercase(Locale.getDefault()) ?: return false
+        if (WEB_SCHEMES.contains(scheme) || ALLOWED_EXTERNAL_SCHEMES.contains(scheme)) {
+            return false
+        }
+        if (scheme == "intent") {
+            val inner = runCatching {
+                Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+            }.getOrNull()
+            val innerScheme = inner?.data?.scheme?.lowercase(Locale.getDefault())
+            return innerScheme == null || !ALLOWED_EXTERNAL_SCHEMES.contains(innerScheme)
+        }
+        return true
     }
 
     private fun startActivityForUrl(view: WebView, url: String): Boolean {
